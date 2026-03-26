@@ -69,10 +69,9 @@ impl<W: fmt::Write> CodeIndenter<W> {
         self.writer.write_str(before).unwrap();
         let res = self.with_indent(|out| {
             out.newline();
-            // Need an explicit `write_indent` call here because calling `out.newline`
-            // will not cause the subsequent line to be indented, as `write_str` thinks
-            // it's an empty line.
-            out.write_indent().unwrap();
+            // Sets `needs_indenting` so the first section will be indented as needed.
+            // Previously a write_indent() was used, but that caused double indent in some cases
+            out.needs_indenting = true;
             f(out)
         });
         self.writer.write_str(after).unwrap();

@@ -8,6 +8,7 @@ use crate::util::{
 use crate::CodegenOptions;
 use crate::OutputFile;
 use convert_case::{Case, Casing};
+use itertools::Itertools;
 use spacetimedb_lib::sats::layout::PrimitiveType;
 use spacetimedb_lib::sats::AlgebraicTypeRef;
 use spacetimedb_schema::def::{ModuleDef, ProcedureDef, ReducerDef, ScopedTypeName, TableDef, TypeDef};
@@ -34,16 +35,17 @@ impl Lang for Rust {
         let out = &mut output;
 
         print_file_header(out, false);
+
         out.newline();
 
         match &module.typespace_for_generate()[typ.ty] {
             AlgebraicTypeDef::Product(product) => {
-                gen_and_print_imports(module, out, &product.elements, &[typ.ty]);
+                gen_and_print_imports(module, out, &product.elements, &[typ.ty], &[]);
                 out.newline();
                 define_struct_for_product(module, out, &type_name, &product.elements, "pub");
             }
             AlgebraicTypeDef::Sum(sum) => {
-                gen_and_print_imports(module, out, &sum.variants, &[typ.ty]);
+                gen_and_print_imports(module, out, &sum.variants, &[typ.ty], &[]);
                 out.newline();
                 define_enum_for_sum(module, out, &type_name, &sum.variants, false);
             }
@@ -57,6 +59,7 @@ impl Lang for Rust {
                 define_enum_for_sum(module, out, &type_name, &variants, true);
             }
         }
+        print_spacetimedb_imports(out);
         out.newline();
 
         writeln!(
@@ -107,10 +110,12 @@ impl __sdk::InModule for {type_name} {{
 
         print_file_header(out, false);
 
+        out.newline();
+
         let row_type = type_ref_name(module, type_ref);
         let row_type_module = type_ref_module_name(module, type_ref);
 
-        writeln!(out, "use super::{row_type_module}::{row_type};");
+        let type_import = format!("use super::{row_type_module}::{row_type};");
 
         let product_def = module.typespace_for_generate()[type_ref].as_product().unwrap();
 
@@ -122,7 +127,9 @@ impl __sdk::InModule for {type_name} {{
             out,
             &product_def.elements,
             &[], // No need to skip any imports; we're not defining a type, so there's no chance of circular imports.
+            &[type_import.as_str()],
         );
+        print_spacetimedb_imports(out);
 
         let table_name = table.name.deref();
         let table_name_pascalcase = table.accessor_name.deref().to_case(Case::Pascal);
@@ -187,8 +194,12 @@ impl<'ctx> __sdk::EventTable for {table_handle}<'ctx> {{
     type Row = {row_type};
     type EventContext = super::EventContext;
 
-    fn count(&self) -> u64 {{ self.imp.count() }}
-    fn iter(&self) -> impl Iterator<Item = {row_type}> + '_ {{ self.imp.iter() }}
+    fn count(&self) -> u64 {{
+        self.imp.count()
+    }}
+    fn iter(&self) -> impl Iterator<Item = {row_type}> + '_ {{
+        self.imp.iter()
+    }}
 
     type InsertCallbackId = {insert_callback_id};
 
@@ -217,8 +228,12 @@ impl<'ctx> __sdk::Table for {table_handle}<'ctx> {{
     type Row = {row_type};
     type EventContext = super::EventContext;
 
-    fn count(&self) -> u64 {{ self.imp.count() }}
-    fn iter(&self) -> impl Iterator<Item = {row_type}> + '_ {{ self.imp.iter() }}
+    fn count(&self) -> u64 {{
+        self.imp.count()
+    }}
+    fn iter(&self) -> impl Iterator<Item = {row_type}> + '_ {{
+        self.imp.iter()
+    }}
 
     type InsertCallbackId = {insert_callback_id};
 
@@ -289,36 +304,36 @@ impl<'ctx> __sdk::TableWithPrimaryKey for {table_handle}<'ctx> {{
                 write!(
                     out,
                     "
-        /// Access to the `{unique_field_name}` unique index on the table `{table_name}`,
-        /// which allows point queries on the field of the same name
-        /// via the [`{unique_constraint}::find`] method.
-        ///
-        /// Users are encouraged not to explicitly reference this type,
-        /// but to directly chain method calls,
-        /// like `ctx.db.{accessor_method}().{unique_field_name}().find(...)`.
-        pub struct {unique_constraint}<'ctx> {{
-            imp: __sdk::UniqueConstraintHandle<{row_type}, {unique_field_type}>,
-            phantom: std::marker::PhantomData<&'ctx super::RemoteTables>,
-        }}
+/// Access to the `{unique_field_name}` unique index on the table `{table_name}`,
+/// which allows point queries on the field of the same name
+/// via the [`{unique_constraint}::find`] method.
+///
+/// Users are encouraged not to explicitly reference this type,
+/// but to directly chain method calls,
+/// like `ctx.db.{accessor_method}().{unique_field_name}().find(...)`.
+pub struct {unique_constraint}<'ctx> {{
+    imp: __sdk::UniqueConstraintHandle<{row_type}, {unique_field_type}>,
+    phantom: std::marker::PhantomData<&'ctx super::RemoteTables>,
+}}
 
-        impl<'ctx> {table_handle}<'ctx> {{
-            /// Get a handle on the `{unique_field_name}` unique index on the table `{table_name}`.
-            pub fn {unique_field_name}(&self) -> {unique_constraint}<'ctx> {{
-                {unique_constraint} {{
-                    imp: self.imp.get_unique_constraint::<{unique_field_type}>({unique_field_name:?}),
-                    phantom: std::marker::PhantomData,
-                }}
-            }}
+impl<'ctx> {table_handle}<'ctx> {{
+    /// Get a handle on the `{unique_field_name}` unique index on the table `{table_name}`.
+    pub fn {unique_field_name}(&self) -> {unique_constraint}<'ctx> {{
+        {unique_constraint} {{
+            imp: self.imp.get_unique_constraint::<{unique_field_type}>({unique_field_name:?}),
+            phantom: std::marker::PhantomData,
         }}
+    }}
+}}
 
-        impl<'ctx> {unique_constraint}<'ctx> {{
-            /// Find the subscribed row whose `{unique_field_name}` column value is equal to `col_val`,
-            /// if such a row is present in the client cache.
-            pub fn find(&self, col_val: &{unique_field_type}) -> Option<{row_type}> {{
-                self.imp.find(col_val)
-            }}
-        }}
-        "
+impl<'ctx> {unique_constraint}<'ctx> {{
+    /// Find the subscribed row whose `{unique_field_name}` column value is equal to `col_val`,
+    /// if such a row is present in the client cache.
+    pub fn find(&self, col_val: &{unique_field_type}) -> Option<{row_type}> {{
+        self.imp.find(col_val)
+    }}
+}}
+"
                 );
             }
 
@@ -329,8 +344,7 @@ impl<'ctx> __sdk::TableWithPrimaryKey for {table_handle}<'ctx> {{
         out.delimited_block(
             "
 #[doc(hidden)]
-pub(super) fn register_table(client_cache: &mut __sdk::ClientCache<super::RemoteModule>) {
-",
+pub(super) fn register_table(client_cache: &mut __sdk::ClientCache<super::RemoteModule>) {",
             |out| {
                 writeln!(out, "let _table = client_cache.get_or_make_table::<{row_type}>({table_name:?});");
                 for (unique_field_ident, unique_field_type_use) in iter_unique_cols(module.typespace_for_generate(), &schema, product_def) {
@@ -355,10 +369,9 @@ pub(super) fn parse_table_update(
     raw_updates: __ws::v2::TableUpdate,
 ) -> __sdk::Result<__sdk::TableUpdate<{row_type}>> {{
     __sdk::TableUpdate::parse_table_update(raw_updates).map_err(|e| {{
-        __sdk::InternalError::failed_parse(
-            \"TableUpdate<{row_type}>\",
-            \"TableUpdate\",
-        ).with_cause(e).into()
+        __sdk::InternalError::failed_parse(\"TableUpdate<{row_type}>\", \"TableUpdate\")
+            .with_cause(e)
+            .into()
     }})
 }}
 "
@@ -385,7 +398,9 @@ pub(super) fn parse_table_update(
             &reducer.params_for_generate.elements,
             // No need to skip any imports; we're not emitting a type that other modules can import.
             &[],
+            &[],
         );
+        print_spacetimedb_imports(out);
 
         out.newline();
 
@@ -521,7 +536,7 @@ impl {func_name} for super::RemoteReducers {{
         let mut imports = Imports::new();
         gen_imports(&mut imports, &procedure.params_for_generate.elements);
         add_one_import(&mut imports, &procedure.return_type_for_generate);
-        print_imports(module, out, imports);
+        print_imports(module, out, imports, &[]);
 
         out.newline();
 
@@ -798,21 +813,21 @@ pub fn implement_query_table_accessor(table: &TableDef, out: &mut impl Write, st
     writeln!(
         out,
         "
-        #[allow(non_camel_case_types)]
-        /// Extension trait for query builder access to the table `{struct_name}`.
-        ///
-        /// Implemented for [`__sdk::QueryTableAccessor`].
-        pub trait {query_accessor_trait} {{
-            #[allow(non_snake_case)]
-            /// Get a query builder for the table `{struct_name}`.
-            fn {accessor_method}(&self) -> __sdk::__query_builder::Table<{struct_name}>;
-        }}
+#[allow(non_camel_case_types)]
+/// Extension trait for query builder access to the table `{struct_name}`.
+///
+/// Implemented for [`__sdk::QueryTableAccessor`].
+pub trait {query_accessor_trait} {{
+    #[allow(non_snake_case)]
+    /// Get a query builder for the table `{struct_name}`.
+    fn {accessor_method}(&self) -> __sdk::__query_builder::Table<{struct_name}>;
+}}
 
-        impl {query_accessor_trait} for __sdk::QueryTableAccessor {{
-            fn {accessor_method}(&self) -> __sdk::__query_builder::Table<{struct_name}> {{
-                __sdk::__query_builder::Table::new({table_name:?})
-            }}
-        }}
+impl {query_accessor_trait} for __sdk::QueryTableAccessor {{
+    fn {accessor_method}(&self) -> __sdk::__query_builder::Table<{struct_name}> {{
+        __sdk::__query_builder::Table::new({table_name:?})
+    }}
+}}
 "
     )
 }
@@ -911,14 +926,7 @@ impl FormattedArglist {
 
 const ALLOW_LINTS: &str = "#![allow(unused, clippy::all)]";
 
-const SPACETIMEDB_IMPORTS: &[&str] = &[
-    "use spacetimedb_sdk::__codegen::{",
-    "\tself as __sdk,",
-    "\t__lib,",
-    "\t__sats,",
-    "\t__ws,",
-    "};",
-];
+const SPACETIMEDB_IMPORTS: &[&str] = &["use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};"];
 
 fn print_spacetimedb_imports(output: &mut Indenter) {
     print_lines(output, SPACETIMEDB_IMPORTS);
@@ -930,7 +938,6 @@ fn print_file_header(output: &mut Indenter, include_version: bool) {
         print_auto_generated_version_comment(output);
     }
     writeln!(output, "{ALLOW_LINTS}");
-    print_spacetimedb_imports(output);
 }
 
 // TODO: figure out if/when sum types should derive:
@@ -2060,11 +2067,17 @@ impl __sdk::{struct_and_trait_name} for {struct_and_trait_name} {{}}
 }
 
 /// Print `use super::` imports for each of the `imports`.
-fn print_imports(module: &ModuleDef, out: &mut Indenter, imports: Imports) {
+fn print_imports(module: &ModuleDef, out: &mut Indenter, imports: Imports, prerendered_imports: &[&str]) {
+    let mut import_statements: Vec<String> = prerendered_imports.iter().map(|str| str.to_string()).collect();
+
     for typeref in imports {
         let module_name = type_ref_module_name(module, typeref);
         let type_name = type_ref_name(module, typeref);
-        writeln!(out, "use super::{module_name}::{type_name};");
+        import_statements.push(format!("use super::{module_name}::{type_name};"));
+    }
+
+    for statement in import_statements.iter().sorted() {
+        writeln!(out, "{statement}");
     }
 }
 
@@ -2096,11 +2109,12 @@ fn gen_and_print_imports(
     out: &mut Indenter,
     roots: &[(Identifier, AlgebraicTypeUse)],
     dont_import: &[AlgebraicTypeRef],
+    prerendered_imports: &[&str],
 ) {
     let mut imports = BTreeSet::new();
 
     gen_imports(&mut imports, roots);
     remove_skipped_imports(&mut imports, dont_import);
 
-    print_imports(module, out, imports);
+    print_imports(module, out, imports, prerendered_imports);
 }
